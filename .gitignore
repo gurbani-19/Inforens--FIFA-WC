@@ -1,0 +1,14 @@
+node_modules/
+.next/
+
+.env
+.env.local
+.env.production
+
+backend/.env
+frontend/.env
+
+*.sqlite
+*.db
+
+backend/last_startup_sync.json
