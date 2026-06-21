@@ -3,8 +3,8 @@
   "version": "1.0.0",
   "description": "Fullstack project configuration for Inforens FIFA Predictor 2026",
   "scripts": {
-    "install:all": "npm install --prefix fifa-predictor-frontend && npm install --prefix backend",
-    "dev:frontend": "npm run dev --prefix fifa-predictor-frontend",
+    "install:all": "npm install --prefix frontend && npm install --prefix backend",
+    "dev:frontend": "npm run dev --prefix frontend",
     "dev:backend": "npm run dev --prefix backend",
     "dev": "npx concurrently \"npm run dev:frontend\" \"npm run dev:backend\""
   },
