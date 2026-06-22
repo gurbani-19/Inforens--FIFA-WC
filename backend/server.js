@@ -390,6 +390,18 @@ app.put('/api/notifications/read', authenticateToken, async (req, res) => {
 });
 
 // --- ADMIN ENDPOINTS ---
+
+app.post('/api/admin/sync-fixtures', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    await syncScheduledMatchesAndPlayoffs();
+    await syncAndSettleYesterdayMatches();
+    const count = await Match.count();
+    res.json({ success: true, message: 'Fixtures synced from football-data.org.', matchCount: count });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.post('/api/admin/matches', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { teamA, teamB, teamAFlag, teamBFlag, kickoffTime } = req.body;
@@ -862,10 +874,23 @@ function findLocalMatch(apiMatch, localMatches) {
   return null;
 }
 
+const FAKE_SEED_API_IDS = ['1001', '1002', '1003', '1004', '1005', '1006', '1007', '1008', '1009', '1010'];
+
+async function purgeFakeSeedMatches() {
+  const removed = await Match.destroy({
+    where: { apiMatchId: { [Op.in]: FAKE_SEED_API_IDS } }
+  });
+  if (removed > 0) {
+    console.log(`[SYNC] Removed ${removed} legacy seed fixture(s) not from football-data.org.`);
+  }
+}
+
 // Hourly cron job: Sync scheduled matches from external API
 async function syncScheduledMatchesAndPlayoffs() {
   console.log(`[PRE-POPULATE: CRON] Starting scheduled matches sync... ${new Date().toISOString()}`);
   try {
+    await purgeFakeSeedMatches();
+
     const apiMatches = await footballDataService.getMatches();
     if (!apiMatches || apiMatches.length === 0) {
       console.log('[PRE-POPULATE: CRON] No matches found in API response.');
@@ -1019,31 +1044,17 @@ async function syncAndSettleYesterdayMatches() {
 
 // --- SEED FUNCTION ---
 async function seedDatabase() {
-  // 1. Create Admins and Users
   const adminPassword = await bcrypt.hash('admin123', 10);
   const userPassword = await bcrypt.hash('password123', 10);
-  
-  const admin = await User.create({
+
+  await User.create({
     username: 'admin',
     email: 'admin@inforens.com',
     password: adminPassword,
     isAdmin: true,
     avatar: '⚽'
   });
-  
-  const user1 = await User.create({
-    username: 'john_doe',
-    email: 'john@example.com',
-    password: userPassword,
-    avatar: '🦁',
-    points: 5,
-    rank: 2,
-    correctPredictions: 5,
-    predictionAccuracy: 71.4,
-    activeStreak: 3,
-    maxStreak: 4
-  });
-  
+
   const user2 = await User.create({
     username: 'jane_smith',
     email: 'jane@example.com',
@@ -1057,7 +1068,20 @@ async function seedDatabase() {
     maxStreak: 5
   });
 
-  const user3 = await User.create({
+  await User.create({
+    username: 'john_doe',
+    email: 'john@example.com',
+    password: userPassword,
+    avatar: '🦁',
+    points: 5,
+    rank: 2,
+    correctPredictions: 5,
+    predictionAccuracy: 71.4,
+    activeStreak: 3,
+    maxStreak: 4
+  });
+
+  await User.create({
     username: 'fifa_fanatic',
     email: 'fanatic@example.com',
     password: userPassword,
@@ -1069,159 +1093,13 @@ async function seedDatabase() {
     activeStreak: 0,
     maxStreak: 2
   });
-  
-  // Create Achievement and Notification for jane_smith
+
   await Achievement.create({ userId: user2.id, badgeType: 'STREAK' });
   await Notification.create({
     userId: user2.id,
     type: 'ACHIEVEMENT',
     message: '🏆 Badge Available to Claim: You unlocked the Hot Streak Badge! Go to Badges to claim it now.'
   });
-  
-  // 2. Create Seed Matches
-  const now = new Date();
-  
-  const m1 = await Match.create({
-    teamA: 'Mexico',
-    teamB: 'South Africa',
-    teamAFlag: '🇲🇽',
-    teamBFlag: '🇿🇦',
-    kickoffTime: new Date('2026-06-11T17:00:00.000Z'),
-    status: 'completed',
-    teamAGoals: 2,
-    teamBGoals: 0,
-    winner: 'teamA',
-    apiMatchId: '1001'
-  });
-
-  const m2 = await Match.create({
-    teamA: 'South Korea',
-    teamB: 'Czechia',
-    teamAFlag: '🇰🇷',
-    teamBFlag: '🇨🇿',
-    kickoffTime: new Date('2026-06-11T20:00:00.000Z'),
-    status: 'completed',
-    teamAGoals: 2,
-    teamBGoals: 1,
-    winner: 'teamA',
-    apiMatchId: '1002'
-  });
-
-  const m3 = await Match.create({
-    teamA: 'Canada',
-    teamB: 'Bosnia & Herz.',
-    teamAFlag: '🇨🇦',
-    teamBFlag: '🇧🇦',
-    kickoffTime: new Date('2026-06-12T17:00:00.000Z'),
-    status: 'completed',
-    teamAGoals: 1,
-    teamBGoals: 1,
-    winner: 'draw',
-    apiMatchId: '1003'
-  });
-
-  const m4 = await Match.create({
-    teamA: 'United States',
-    teamB: 'Paraguay',
-    teamAFlag: '🇺🇸',
-    teamBFlag: '🇵🇾',
-    kickoffTime: new Date('2026-06-12T20:00:00.000Z'),
-    status: 'completed',
-    teamAGoals: 4,
-    teamBGoals: 1,
-    winner: 'teamA',
-    apiMatchId: '1004'
-  });
-
-  const m5 = await Match.create({
-    teamA: 'Brazil',
-    teamB: 'Morocco',
-    teamAFlag: '🇧🇷',
-    teamBFlag: '🇲🇦',
-    kickoffTime: new Date('2026-06-13T17:00:00.000Z'),
-    status: 'completed',
-    teamAGoals: 3,
-    teamBGoals: 1,
-    winner: 'teamA',
-    apiMatchId: '1005'
-  });
-
-  const m6 = await Match.create({
-    teamA: 'Australia',
-    teamB: 'Türkiye',
-    teamAFlag: '🇦🇺',
-    teamBFlag: '🇹🇷',
-    kickoffTime: new Date('2026-06-13T20:00:00.000Z'),
-    status: 'completed',
-    teamAGoals: 1,
-    teamBGoals: 2,
-    winner: 'teamB',
-    apiMatchId: '1006'
-  });
-
-  const m7 = await Match.create({
-    teamA: 'Germany',
-    teamB: 'Curaçao',
-    teamAFlag: '🇩🇪',
-    teamBFlag: '🇨🇼',
-    kickoffTime: new Date(now.getTime() + 14 * 60 * 60 * 1000), // starts in 14h
-    status: 'scheduled',
-    apiMatchId: '1007'
-  });
-
-  const m8 = await Match.create({
-    teamA: 'Netherlands',
-    teamB: 'Japan',
-    teamAFlag: '🇳🇱',
-    teamBFlag: '🇯🇵',
-    kickoffTime: new Date(now.getTime() + 10 * 60 * 60 * 1000), // starts in 10h
-    status: 'scheduled',
-    apiMatchId: '1008'
-  });
-
-  const m9 = await Match.create({
-    teamA: 'Spain',
-    teamB: 'Cape Verde',
-    teamAFlag: '🇪🇸',
-    teamBFlag: '🇨🇻',
-    kickoffTime: new Date(now.getTime() + 36 * 60 * 60 * 1000), // starts in 36h
-    status: 'scheduled',
-    apiMatchId: '1009'
-  });
-
-  const m10 = await Match.create({
-    teamA: 'Belgium',
-    teamB: 'Egypt',
-    teamAFlag: '🇧🇪',
-    teamBFlag: '🇪🇬',
-    kickoffTime: new Date(now.getTime() + 40 * 60 * 60 * 1000), // starts in 40h
-    status: 'scheduled',
-    apiMatchId: '1010'
-  });
-
-  // Seed standard Predictions (+1 point outcomes)
-  await Prediction.create({ userId: user3.id, matchId: m1.id, predictedWinner: 'teamB', pointsEarned: 0, isProcessed: true });
-  await Prediction.create({ userId: user3.id, matchId: m2.id, predictedWinner: 'teamB', pointsEarned: 0, isProcessed: true });
-  await Prediction.create({ userId: user3.id, matchId: m3.id, predictedWinner: 'draw', pointsEarned: 1, isProcessed: true });
-  await Prediction.create({ userId: user3.id, matchId: m4.id, predictedWinner: 'teamB', pointsEarned: 0, isProcessed: true });
-  await Prediction.create({ userId: user3.id, matchId: m5.id, predictedWinner: 'teamB', pointsEarned: 0, isProcessed: true });
-  await Prediction.create({ userId: user3.id, matchId: m6.id, predictedWinner: 'teamA', pointsEarned: 0, isProcessed: true });
-
-  await Prediction.create({ userId: user1.id, matchId: m1.id, predictedWinner: 'teamB', pointsEarned: 0, isProcessed: true });
-  await Prediction.create({ userId: user1.id, matchId: m2.id, predictedWinner: 'teamB', pointsEarned: 0, isProcessed: true });
-  await Prediction.create({ userId: user1.id, matchId: m3.id, predictedWinner: 'draw', pointsEarned: 1, isProcessed: true });
-  await Prediction.create({ userId: user1.id, matchId: m4.id, predictedWinner: 'teamA', pointsEarned: 1, isProcessed: true });
-  await Prediction.create({ userId: user1.id, matchId: m5.id, predictedWinner: 'teamA', pointsEarned: 1, isProcessed: true });
-  await Prediction.create({ userId: user1.id, matchId: m6.id, predictedWinner: 'teamB', pointsEarned: 1, isProcessed: true });
-  await Prediction.create({ userId: user1.id, matchId: m7.id, predictedWinner: 'teamA' });
-
-  await Prediction.create({ userId: user2.id, matchId: m1.id, predictedWinner: 'teamA', pointsEarned: 1, isProcessed: true });
-  await Prediction.create({ userId: user2.id, matchId: m2.id, predictedWinner: 'teamA', pointsEarned: 1, isProcessed: true });
-  await Prediction.create({ userId: user2.id, matchId: m3.id, predictedWinner: 'draw', pointsEarned: 1, isProcessed: true });
-  await Prediction.create({ userId: user2.id, matchId: m4.id, predictedWinner: 'teamA', pointsEarned: 1, isProcessed: true });
-  await Prediction.create({ userId: user2.id, matchId: m5.id, predictedWinner: 'teamA', pointsEarned: 1, isProcessed: true });
-  await Prediction.create({ userId: user2.id, matchId: m6.id, predictedWinner: 'teamB', pointsEarned: 1, isProcessed: true });
-  await Prediction.create({ userId: user2.id, matchId: m7.id, predictedWinner: 'teamA' });
 
   await Reward.create({
     userId: user2.id,
@@ -1230,8 +1108,8 @@ async function seedDatabase() {
     type: 'merchandise',
     value: 'Inforens Predictor Cap'
   });
-  
-  console.log('Database synced & seeded successfully for FIFA World Cup Predictor!');
+
+  console.log('[SEED] Created sample users. Fixtures will be loaded from football-data.org on startup sync.');
 }
 
 // Start Server & Sync hooks
@@ -1296,10 +1174,17 @@ sequelize.authenticate()
 
     const userCount = await User.count();
     if (userCount === 0) {
-      console.log('Database empty. Seeding initial data...');
+      console.log('Database empty. Seeding admin account...');
       await seedDatabase();
     } else {
       console.log('Database already has data. Skipping seed.');
+    }
+
+    const matchCount = await Match.count();
+    if (matchCount === 0) {
+      console.log('[STARTUP] No fixtures in database — syncing from football-data.org...');
+      await syncScheduledMatchesAndPlayoffs();
+      await syncAndSettleYesterdayMatches();
     }
   })
   .then(async () => {
