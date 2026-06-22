@@ -629,8 +629,9 @@ async function resolveMatchResult(matchId, teamAGoals, teamBGoals, forceReproces
       throw new Error('Match not found');
     }
     
-    if (match.status === 'completed' && !forceReprocess) {
-      console.log(`[resolveMatchResult] Match ${matchId} is already completed. Skipping settlement.`);
+    const alreadySettled = match.teamAGoals !== null && match.teamBGoals !== null && match.winner !== null;
+    if (match.status === 'completed' && alreadySettled && !forceReprocess) {
+      console.log(`[resolveMatchResult] Match ${matchId} is already completed and settled. Skipping.`);
       await transaction.rollback();
       return match;
     }
@@ -794,6 +795,30 @@ function normalizeTeamName(name) {
              .trim();
 }
 
+function teamsAlignWithApi(localMatch, apiHomeName, apiAwayName) {
+  const normHome = normalizeTeamName(apiHomeName);
+  const normAway = normalizeTeamName(apiAwayName);
+  const normA = normalizeTeamName(localMatch.teamA);
+  const normB = normalizeTeamName(localMatch.teamB);
+  const homeIsA = (normHome.includes(normA) || normA.includes(normHome)) &&
+    (normAway.includes(normB) || normB.includes(normAway));
+  return homeIsA;
+}
+
+function mapApiScoresToLocal(localMatch, apiMatch) {
+  const homeGoals = apiMatch.score?.fullTime?.home;
+  const awayGoals = apiMatch.score?.fullTime?.away;
+  if (homeGoals === null || homeGoals === undefined || awayGoals === null || awayGoals === undefined) {
+    return { teamAGoals: null, teamBGoals: null };
+  }
+  const apiHome = apiMatch.homeTeam?.name || apiMatch.homeTeam?.shortName || '';
+  const apiAway = apiMatch.awayTeam?.name || apiMatch.awayTeam?.shortName || '';
+  if (teamsAlignWithApi(localMatch, apiHome, apiAway)) {
+    return { teamAGoals: homeGoals, teamBGoals: awayGoals };
+  }
+  return { teamAGoals: awayGoals, teamBGoals: homeGoals };
+}
+
 function findLocalMatch(apiMatch, localMatches) {
   if (!apiMatch || !localMatches) return null;
 
@@ -801,32 +826,35 @@ function findLocalMatch(apiMatch, localMatches) {
   let match = localMatches.find(m => m.apiMatchId && m.apiMatchId.toString() === apiMatch.id.toString());
   if (match) return match;
 
-  // 2. Match by home / away team names (includes check)
+  // 2. Match by home/away team names (teamA = home, teamB = away)
   if (apiMatch.homeTeam && apiMatch.awayTeam) {
-    const normApi0 = normalizeTeamName(apiMatch.homeTeam.name || apiMatch.homeTeam.shortName);
-    const normApi1 = normalizeTeamName(apiMatch.awayTeam.name || apiMatch.awayTeam.shortName);
+    const apiHome = apiMatch.homeTeam.name || apiMatch.homeTeam.shortName;
+    const apiAway = apiMatch.awayTeam.name || apiMatch.awayTeam.shortName;
+    const normApiHome = normalizeTeamName(apiHome);
+    const normApiAway = normalizeTeamName(apiAway);
 
-    if (normApi0 && normApi1) {
-      match = localMatches.find(m => {
-        const normLocalA = normalizeTeamName(m.teamA);
-        const normLocalB = normalizeTeamName(m.teamB);
-        return (
-          (normApi0.includes(normLocalA) && normApi1.includes(normLocalB)) ||
-          (normApi0.includes(normLocalB) && normApi1.includes(normLocalA)) ||
-          (normLocalA.includes(normApi0) && normLocalB.includes(normApi1)) ||
-          (normLocalA.includes(normApi1) && normLocalB.includes(normApi0))
-        );
-      });
+    if (normApiHome && normApiAway) {
+      match = localMatches.find(m => teamsAlignWithApi(m, apiHome, apiAway));
       if (match) return match;
     }
   }
 
-  // 3. Fallback: match by kickoffTime
-  if (apiMatch.utcDate) {
+  // 3. Fallback: kickoff time plus at least one overlapping team name
+  if (apiMatch.utcDate && apiMatch.homeTeam && apiMatch.awayTeam) {
     const apiTime = new Date(apiMatch.utcDate).getTime();
+    const normApiHome = normalizeTeamName(apiMatch.homeTeam.name || apiMatch.homeTeam.shortName);
+    const normApiAway = normalizeTeamName(apiMatch.awayTeam.name || apiMatch.awayTeam.shortName);
     match = localMatches.find(m => {
       const localTime = new Date(m.kickoffTime).getTime();
-      return Math.abs(localTime - apiTime) < 15 * 60 * 1000; // 15 mins threshold
+      if (Math.abs(localTime - apiTime) >= 15 * 60 * 1000) return false;
+      const normA = normalizeTeamName(m.teamA);
+      const normB = normalizeTeamName(m.teamB);
+      return [normA, normB].some(t =>
+        t && (
+          normApiHome.includes(t) || t.includes(normApiHome) ||
+          normApiAway.includes(t) || t.includes(normApiAway)
+        )
+      );
     });
     if (match) return match;
   }
@@ -863,37 +891,40 @@ async function syncScheduledMatchesAndPlayoffs() {
       }
 
       if (localM) {
-        if (localM.status !== 'completed') {
-          const updates = {};
-          
-          if (localM.teamA !== teamA) updates.teamA = teamA;
-          if (localM.teamB !== teamB) updates.teamB = teamB;
-          if (localM.teamAFlag !== teamAFlag) updates.teamAFlag = teamAFlag;
-          if (localM.teamBFlag !== teamBFlag) updates.teamBFlag = teamBFlag;
-          
-          if (new Date(localM.kickoffTime).getTime() !== apiTime.getTime()) {
-            updates.kickoffTime = apiTime;
-          }
-          
-          if (localM.apiMatchId !== apiM.id.toString()) {
-            updates.apiMatchId = apiM.id.toString();
-          }
+        const updates = {};
 
-          if (localM.status !== status) {
-            updates.status = status;
-          }
+        if (localM.teamA !== teamA) updates.teamA = teamA;
+        if (localM.teamB !== teamB) updates.teamB = teamB;
+        if (localM.teamAFlag !== teamAFlag) updates.teamAFlag = teamAFlag;
+        if (localM.teamBFlag !== teamBFlag) updates.teamBFlag = teamBFlag;
 
-          if (Object.keys(updates).length > 0) {
-            console.log(`[PRE-POPULATE: CRON] Updating match ${localM.id}:`, updates);
-            await localM.update(updates);
-          }
+        if (new Date(localM.kickoffTime).getTime() !== apiTime.getTime()) {
+          updates.kickoffTime = apiTime;
+        }
 
-          if (status === 'completed') {
-            const scoreHome = apiM.score?.fullTime?.home;
-            const scoreAway = apiM.score?.fullTime?.away;
-            if (scoreHome !== null && scoreHome !== undefined && scoreAway !== null && scoreAway !== undefined) {
-              console.log(`[RESULTS SETTLEMENT] Settle match ${localM.id}: ${localM.teamA} vs ${localM.teamB}. Winner: ${scoreHome}-${scoreAway}`);
-              await resolveMatchResult(localM.id, scoreHome, scoreAway);
+        if (localM.apiMatchId !== apiM.id.toString()) {
+          updates.apiMatchId = apiM.id.toString();
+        }
+
+        if (status !== 'completed' && localM.status !== status) {
+          updates.status = status;
+        }
+
+        if (Object.keys(updates).length > 0) {
+          console.log(`[PRE-POPULATE: CRON] Updating match ${localM.id}:`, updates);
+          await localM.update(updates);
+          await localM.reload();
+        }
+
+        if (status === 'completed') {
+          const { teamAGoals, teamBGoals } = mapApiScoresToLocal(localM, apiM);
+          if (teamAGoals !== null && teamBGoals !== null) {
+            const needsSettlement = localM.teamAGoals === null || localM.teamBGoals === null || localM.winner === null ||
+              localM.teamAGoals !== teamAGoals || localM.teamBGoals !== teamBGoals;
+            if (needsSettlement) {
+              const forceReprocess = localM.status === 'completed' && localM.teamAGoals !== null && localM.teamBGoals !== null;
+              console.log(`[RESULTS SETTLEMENT] Settle match ${localM.id}: ${localM.teamA} vs ${localM.teamB}. Score: ${teamAGoals}-${teamBGoals}`);
+              await resolveMatchResult(localM.id, teamAGoals, teamBGoals, forceReprocess);
             }
           }
         }
@@ -910,11 +941,10 @@ async function syncScheduledMatchesAndPlayoffs() {
         });
 
         if (status === 'completed') {
-          const scoreHome = apiM.score?.fullTime?.home;
-          const scoreAway = apiM.score?.fullTime?.away;
-          if (scoreHome !== null && scoreHome !== undefined && scoreAway !== null && scoreAway !== undefined) {
-            console.log(`[RESULTS SETTLEMENT] Settle new match ${newMatch.id}: ${teamA} vs ${teamB}. Winner: ${scoreHome}-${scoreAway}`);
-            await resolveMatchResult(newMatch.id, scoreHome, scoreAway);
+          const { teamAGoals, teamBGoals } = mapApiScoresToLocal(newMatch, apiM);
+          if (teamAGoals !== null && teamBGoals !== null) {
+            console.log(`[RESULTS SETTLEMENT] Settle new match ${newMatch.id}: ${teamA} vs ${teamB}. Score: ${teamAGoals}-${teamBGoals}`);
+            await resolveMatchResult(newMatch.id, teamAGoals, teamBGoals);
           }
         }
       }
@@ -965,11 +995,15 @@ async function syncAndSettleYesterdayMatches() {
 
       if (apiMatch) {
         if (apiMatch.status === 'FINISHED') {
-          const scoreHome = apiMatch.score?.fullTime?.home;
-          const scoreAway = apiMatch.score?.fullTime?.away;
-          if (scoreHome !== null && scoreHome !== undefined && scoreAway !== null && scoreAway !== undefined) {
-            console.log(`[RESULTS SETTLEMENT: CRON] Settle match ${localMatch.id}: ${localMatch.teamA} vs ${localMatch.teamB}. Winner: ${scoreHome}-${scoreAway}`);
-            await resolveMatchResult(localMatch.id, scoreHome, scoreAway);
+          const { teamAGoals, teamBGoals } = mapApiScoresToLocal(localMatch, apiMatch);
+          if (teamAGoals !== null && teamBGoals !== null) {
+            const needsSettlement = localMatch.teamAGoals === null || localMatch.teamBGoals === null || localMatch.winner === null ||
+              localMatch.teamAGoals !== teamAGoals || localMatch.teamBGoals !== teamBGoals;
+            if (needsSettlement) {
+              const forceReprocess = localMatch.status === 'completed' && localMatch.teamAGoals !== null && localMatch.teamBGoals !== null;
+              console.log(`[RESULTS SETTLEMENT: CRON] Settle match ${localMatch.id}: ${localMatch.teamA} vs ${localMatch.teamB}. Score: ${teamAGoals}-${teamBGoals}`);
+              await resolveMatchResult(localMatch.id, teamAGoals, teamBGoals, forceReprocess);
+            }
           }
         } else {
           console.log(`[RESULTS SETTLEMENT: CRON] Match ${localMatch.id} is yesterday but apiMatch.status is not FINISHED.`);
@@ -1268,7 +1302,16 @@ sequelize.authenticate()
       console.log('Database already has data. Skipping seed.');
     }
   })
-  .then(() => {
+  .then(async () => {
+    if (process.env.RUN_SYNC_ONLY === '1') {
+      console.log('[RUN_SYNC_ONLY] Running fixture sync and settlement...');
+      await syncScheduledMatchesAndPlayoffs();
+      await syncAndSettleYesterdayMatches();
+      console.log('[RUN_SYNC_ONLY] Complete.');
+      process.exit(0);
+      return;
+    }
+
     app.listen(PORT, () => {
       console.log(`Backend server is running on port ${PORT}`);
       
